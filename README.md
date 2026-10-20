@@ -26,4 +26,8 @@ Swagger: `http://localhost:8000/docs`
 - `POST /api/requirements`
 - `GET /api/backend-health`
 
-La rama `main` contiene autenticación débil, SQL concatenado, manejo inseguro de nombres de archivo, conexión global, lógica monolítica y dependencias con CVEs.
+Set `AUTH_TOKEN_SECRET` to the same secret used by the auth backend; it must contain at least 32 UTF-8 bytes. The API accepts signed HS256 JWTs only and rejects the legacy Base64 token format.
+
+Task list, summary, and creation are scoped to the authenticated username. Supplying a different owner returns `403`. Requirement uploads accept basenames only, do not overwrite existing files, and are limited to 10 MiB; invalid names or collisions return `400`, and oversized files return `413`.
+
+Fuera de estos controles permanecen deuda del laboratorio, incluida la conexión global SQLite y CORS permisivo. Esta API sigue destinada exclusivamente a entornos aislados; revisar `RETO.md` antes de cualquier despliegue.
