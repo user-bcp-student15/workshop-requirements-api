@@ -1,11 +1,13 @@
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+pythonpath = ["."]
 
 [tool.coverage.run]
 branch = true
 source = ["app"]
 
 [tool.coverage.report]
+fail_under = 85
 show_missing = true
 skip_covered = true

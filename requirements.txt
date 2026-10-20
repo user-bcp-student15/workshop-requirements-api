@@ -1,5 +1,7 @@
-fastapi==0.128.2
+fastapi==0.156.1
 uvicorn[standard]==0.48.0
 pydantic==2.13.4
-urllib3==2.5.0
-python-multipart==0.0.21
+urllib3==2.8.0
+python-multipart==0.0.32
+PyJWT==2.15.1
+starlette==1.3.1
