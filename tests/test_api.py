@@ -1,4 +1,5 @@
 import base64
+import asyncio
 import json
 import time
 from pathlib import Path
@@ -7,7 +8,12 @@ import jwt
 import pytest
 from fastapi.testclient import TestClient
 
-from app.main import MAX_UPLOAD_SIZE, create_app
+from app.main import (
+    MAX_UPLOAD_REQUEST_SIZE,
+    MAX_UPLOAD_SIZE,
+    UploadBodyLimitMiddleware,
+    create_app,
+)
 
 TEST_SECRET = "workshop-test-secret-32-bytes-minimum-value"
 
@@ -102,6 +108,21 @@ def test_uploads_requirement(tmp_path: Path) -> None:
     assert (upload_dir / "requirements.txt").read_bytes() == b"Login must be accessible"
 
 
+def test_upload_accepts_file_at_exact_size_limit(tmp_path: Path) -> None:
+    upload_dir = tmp_path / "uploads"
+    app = create_app(str(tmp_path / "workshop.db"), str(upload_dir))
+    content = b"x" * MAX_UPLOAD_SIZE
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/requirements",
+            headers=headers(),
+            files={"file": ("maximum.txt", content, "text/plain")},
+        )
+    assert response.status_code == 201
+    assert response.json()["size"] == MAX_UPLOAD_SIZE
+    assert (upload_dir / "maximum.txt").stat().st_size == MAX_UPLOAD_SIZE
+
+
 @pytest.mark.parametrize("filename", ["../outside.txt", "..\\outside.txt", ".", ".."])
 def test_upload_rejects_unsafe_filenames(tmp_path: Path, filename: str) -> None:
     upload_dir = tmp_path / "uploads"
@@ -145,6 +166,71 @@ def test_upload_rejects_oversized_file_without_writing(tmp_path: Path) -> None:
     assert response.status_code == 413
     assert response.json() == {"detail": "File exceeds 10 MiB limit"}
     assert list(upload_dir.iterdir()) == []
+
+
+def test_upload_request_body_limit_rejects_before_multipart_parsing(tmp_path: Path) -> None:
+    upload_dir = tmp_path / "uploads"
+    app = create_app(str(tmp_path / "workshop.db"), str(upload_dir))
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/requirements",
+            headers={**headers(), "Content-Type": "multipart/form-data; boundary=oversized"},
+            content=b"x" * (MAX_UPLOAD_REQUEST_SIZE + 1),
+        )
+    assert response.status_code == 413
+    assert response.json() == {"detail": "File exceeds 10 MiB limit"}
+    assert list(upload_dir.iterdir()) == []
+
+
+def test_upload_body_limit_rejects_chunked_request_without_content_length() -> None:
+    sent: list[dict[str, object]] = []
+    chunks = iter(
+        [
+            {
+                "type": "http.request",
+                "body": b"x" * (MAX_UPLOAD_REQUEST_SIZE // 2),
+                "more_body": True,
+            },
+            {
+                "type": "http.request",
+                "body": b"x" * (MAX_UPLOAD_REQUEST_SIZE // 2 + 1),
+                "more_body": True,
+            },
+        ]
+    )
+    downstream_called = False
+
+    async def receive() -> dict[str, object]:
+        return next(chunks)
+
+    async def send(message: dict[str, object]) -> None:
+        sent.append(message)
+
+    async def downstream(scope: dict[str, object], receive: object, send: object) -> None:
+        nonlocal downstream_called
+        downstream_called = True
+
+    middleware = UploadBodyLimitMiddleware(downstream, MAX_UPLOAD_REQUEST_SIZE)
+    asyncio.run(
+        middleware(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/api/requirements",
+                "headers": [(b"content-type", b"multipart/form-data; boundary=oversized")],
+            },
+            receive,
+            send,
+        )
+    )
+
+    response_start = next(message for message in sent if message["type"] == "http.response.start")
+    response_body = b"".join(
+        message.get("body", b"") for message in sent if message["type"] == "http.response.body"
+    )
+    assert response_start["status"] == 413
+    assert json.loads(response_body) == {"detail": "File exceeds 10 MiB limit"}
+    assert not downstream_called
 
 
 def test_upload_does_not_overwrite_existing_file(tmp_path: Path) -> None:

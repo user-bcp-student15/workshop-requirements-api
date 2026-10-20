@@ -10,12 +10,65 @@ import urllib3
 from fastapi import Body, Depends, FastAPI, File, Header, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from jwt import InvalidTokenError
+from starlette.responses import JSONResponse
 
 JWT_ALGORITHM = "HS256"
 MAX_UPLOAD_SIZE = 10 * 1024 * 1024
+MAX_MULTIPART_OVERHEAD = 64 * 1024
+MAX_UPLOAD_REQUEST_SIZE = MAX_UPLOAD_SIZE + MAX_MULTIPART_OVERHEAD
 JWT_SECRET = os.getenv("AUTH_TOKEN_SECRET")
 if not JWT_SECRET or len(JWT_SECRET.encode("utf-8")) < 32:
     raise RuntimeError("AUTH_TOKEN_SECRET must be configured with at least 32 UTF-8 bytes")
+
+
+class UploadBodyLimitMiddleware:
+    def __init__(self, app: Any, max_request_size: int) -> None:
+        self.app = app
+        self.max_request_size = max_request_size
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope["type"] != "http" or scope["method"] != "POST" or scope["path"] != "/api/requirements":
+            await self.app(scope, receive, send)
+            return
+
+        headers = dict(scope["headers"])
+        content_length = headers.get(b"content-length")
+        if content_length:
+            try:
+                if int(content_length) > self.max_request_size:
+                    await JSONResponse(
+                        {"detail": "File exceeds 10 MiB limit"},
+                        status_code=413,
+                    )(scope, receive, send)
+                    return
+            except ValueError:
+                pass
+
+        body = bytearray()
+        while True:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                return
+            body.extend(message.get("body", b""))
+            if len(body) > self.max_request_size:
+                await JSONResponse(
+                    {"detail": "File exceeds 10 MiB limit"},
+                    status_code=413,
+                )(scope, receive, send)
+                return
+            if not message.get("more_body", False):
+                break
+
+        replayed = False
+
+        async def replay_body() -> dict[str, Any]:
+            nonlocal replayed
+            if replayed:
+                return {"type": "http.disconnect"}
+            replayed = True
+            return {"type": "http.request", "body": bytes(body), "more_body": False}
+
+        await self.app(scope, replay_body, send)
 
 
 def legacy_identity(authorization: str = Header(default="")) -> dict[str, str]:
@@ -70,6 +123,7 @@ def create_app(db_path: str | None = None, upload_dir: str | None = None) -> Fas
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    app.add_middleware(UploadBodyLimitMiddleware, max_request_size=MAX_UPLOAD_REQUEST_SIZE)
 
     def as_task(row: sqlite3.Row) -> dict[str, Any]:
         return {
